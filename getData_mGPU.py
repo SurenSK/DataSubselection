@@ -489,13 +489,14 @@ def main():
             embeddings_list = []
             logLine("Initialized probe prompts")
 
-            @find_executable_batch_size(starting_batch_size=8)
-            def run_benchmark(batch_size):
-                _ = getPromptPerf(model, tokenizer, accelerator, population[0].prompt, trainset, batch_size)
+            # @find_executable_batch_size(starting_batch_size=8)
+            # def run_benchmark(batch_size):
+            #     _ = getPromptPerf(model, tokenizer, accelerator, population[0].prompt, trainset, batch_size)
 
-            logLine("Finding max batch size...")
-            run_benchmark()
-            NINFBATCH = run_benchmark.batch_size
+            # logLine("Finding max batch size...")
+            # run_benchmark()
+            # NINFBATCH = run_benchmark.batch_size
+            NINFBATCH = 24
             logLine(f"Max usable batch size: {NINFBATCH}")
 
             logLine("Initializing embeddings")
