@@ -10,10 +10,6 @@ from transformers import AutoTokenizer, AutoModelForCausalLM
 from scipy.sparse.csgraph import shortest_path
 from datasets import load_dataset
 import ot
-from torch.utils.data import DataLoader, Dataset
-from accelerate import Accelerator
-from accelerate import find_executable_batch_size
-from accelerate.utils import set_seed
 
 class PromptSample:
     count = 0
@@ -32,14 +28,11 @@ class PromptSample:
         return f"ID:{self.sampleId} fitness={fitness_str} fitnessTe={fitnessTe_str} prompt=<{self.prompt}>"
 
 log_file_path = "log.txt"
-logAccelerator = None
 def logLine(s, verbose=False):
-    global log_file_path, logAccelerator
-    if logAccelerator is None or logAccelerator.is_main_process:
-        if verbose:
-            print(s)
-        with open(log_file_path, "a") as log_file:
-            log_file.write(str(s) + "\n")
+    if verbose:
+        print(s)
+    with open(log_file_path, "a") as log_file:
+        log_file.write(str(s) + "\n")
 
 def getGSM8k(n=None):
     dataset = []
@@ -232,53 +225,40 @@ def OT_sampling(k: int, X: np.ndarray, C: np.ndarray, max_iters: int = 100, num_
     
     return final_Q_indices, final_Qw
 
-def getNLL(model, tokenizer, accelerator, inputStr_list, outputStr_list, batch_size):
-    class NLLDataset(Dataset):
-        def __init__(self, inputs, outputs):
-            self.inputs = inputs
-            self.outputs = outputs
-        def __len__(self):
-            return len(self.inputs)
-        def __getitem__(self, idx):
-            return self.inputs[idx], self.outputs[idx]
-    dataset = NLLDataset(inputStr_list, outputStr_list)
-    dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=False)
-
+from tqdm import tqdm
+def getNLL(model, tokenizer, inputStr_list, outputStr_list, batch_size):
     all_neg_losses = []
     all_perplexities = []
     
-    model.eval()
-    for batch in dataloader:
-        batch_inputs, batch_outputs = batch
+    for i in tqdm(range(0, len(inputStr_list), batch_size)):
+        batch_inputs = inputStr_list[i:i+batch_size]
+        batch_outputs = outputStr_list[i:i+batch_size]
+        
         combined_seq_list = [inp + out for inp, out in zip(batch_inputs, batch_outputs)]
-
-        inputToks = tokenizer(combined_seq_list, return_tensors="pt", padding=True, truncation=True)
+        
+        inputToks = tokenizer(combined_seq_list, return_tensors="pt", padding=True, truncation=True).to(model.device)
         batched_labels = inputToks.input_ids.clone()
-
+        
         for j, input_str in enumerate(batch_inputs):
             input_len = len(tokenizer(input_str, add_special_tokens=False).input_ids)
             if tokenizer.bos_token_id is not None and inputToks.input_ids[j, 0] == tokenizer.bos_token_id:
                 input_len += 1
             batched_labels[j, :input_len] = -100
             batched_labels[j, inputToks.input_ids[j] == tokenizer.pad_token_id] = -100
-
-        inputToks = {k: v.to(accelerator.device) for k, v in inputToks.items()}
-        batched_labels = batched_labels.to(accelerator.device)
-
+        
         with torch.no_grad():
             outputs = model(**inputToks, labels=batched_labels)
-
+        
         shift_logits = outputs.logits[..., :-1, :].contiguous()
         shift_labels = batched_labels[..., 1:].contiguous()
         loss_fct = CrossEntropyLoss(reduction='none')
-
+        
         for j in range(len(batch_inputs)):
-            seq_len = inputToks['attention_mask'][j].sum().item()
-            loss_per_token = loss_fct(
-                shift_logits[j, :seq_len - 1].view(-1, shift_logits.size(-1)),
-                shift_labels[j, :seq_len - 1].view(-1)
-            )
-            valid_losses = loss_per_token[shift_labels[j, :seq_len - 1].view(-1) != -100]
+            seq_len = inputToks.attention_mask[j].sum().item()
+            loss_per_token = loss_fct(shift_logits[j, :seq_len-1].view(-1, shift_logits.size(-1)),
+                                    shift_labels[j, :seq_len-1].view(-1))
+            valid_losses = loss_per_token[shift_labels[j, :seq_len-1].view(-1) != -100]
+            
             if len(valid_losses) > 0:
                 item_loss = valid_losses.mean()
                 all_neg_losses.append(-item_loss.item())
@@ -286,14 +266,14 @@ def getNLL(model, tokenizer, accelerator, inputStr_list, outputStr_list, batch_s
             else:
                 all_neg_losses.append(float('-inf'))
                 all_perplexities.append(float('inf'))
-
+    
     return all_neg_losses, all_perplexities
 
-def getPromptPerf(model, tokenizer, accelerator, p, dataset, batch_size):
+def getPromptPerf(model, tokenizer, p, dataset, batch_size):
     meta = p + "\n"
     inputs = [meta + sample[0] + "\n" for sample in dataset]
     outputs = [sample[1] for sample in dataset]
-    neg_logprobs, _ = getNLL(model, tokenizer, accelerator, inputs, outputs, batch_size)
+    neg_logprobs, _ = getNLL(model, tokenizer, inputs, outputs, batch_size)
     probs_from_neg_logprobs = torch.tensor([math.exp(nlp) for nlp in neg_logprobs])
     return probs_from_neg_logprobs
 
@@ -346,17 +326,12 @@ def mutate(model, tokenizer, p1):
 def crossover(p1, p2):
     return PromptSample([random.choice(pair) for pair in zip(p1.codons, p2.codons)])
 
-def main():
+def main(datasetIdx, logFileIdx):
     global log_file_path
-    global logAccelerator
-    accelerator = Accelerator()
-    logAccelerator = accelerator
-
     logLine("Starting")
 
     modelName = "Qwen/Qwen2.5-7B"
-    NINFBATCH = 4
-    NDATASETRUNS = 5
+    NINFBATCH = 16
     NPOP = 25
     NGENS = 10
     NELITES = 2
@@ -454,111 +429,99 @@ def main():
     ]
 
     logLine("Loading model...")
-    # tokenizer = AutoTokenizer.from_pretrained(modelName)
-    # model = AutoModelForCausalLM.from_pretrained(modelName, cache_dir=".", torch_dtype=torch.float16, device_map="auto")
     tokenizer = AutoTokenizer.from_pretrained(modelName)
-    model = AutoModelForCausalLM.from_pretrained(modelName, cache_dir=".", torch_dtype=torch.float16)
-    model = accelerator.prepare(model)
+    model = AutoModelForCausalLM.from_pretrained(modelName, torch_dtype=torch.float16, cache_dir=".", device_map="auto")
     logLine("Loaded model")
 
-    for datasetrun in range(NDATASETRUNS):
-        for datasetID, seedCodons in datasetConfigs:
-            log_file_path = f"log_{datasetID}_{datasetrun}.txt"
-            tRunStart = time.time()
-            data = {}
-            data["GtTr"] = []
-            data["GtTe"] = []
-            totalNLLTime = 0
-            totalNLLElems = 0
+    datasetID, seedCodons = datasetConfigs[datasetIdx]
+    datasetrun = logFileIdx
+    log_file_path = f"log_{datasetID}_{datasetrun}.txt"
+    tRunStart = time.time()
+    data = {}
+    data["GtTr"] = []
+    data["GtTe"] = []
+    totalNLLTime = 0
+    totalNLLElems = 0
 
-            logLine(f"\t****Starting {datasetID}-{datasetrun}")
+    logLine(f"\t****Starting {datasetID}-{datasetrun}")
 
-            SEED = datasetrun
-            set_seed(SEED)
-            logLine(f"Seeds set to {SEED}")
+    logLine("Loading dataset...")
+    fullDataset = getData(datasetID)
+    splitIdx = int(len(fullDataset)*SPLIT)
+    trainset = fullDataset[:splitIdx]
+    testset = fullDataset[splitIdx:]
+    logLine("Loaded dataset")
 
-            logLine("Loading dataset...")
-            fullDataset = getData(datasetID)
-            splitIdx = int(len(fullDataset)*SPLIT)
-            trainset = fullDataset[:splitIdx]
-            testset = fullDataset[splitIdx:]
-            logLine("Loaded dataset")
+    logLine("Initializing probe prompts...")
+    population = initPop(seedCodons, NPOP)
+    embeddings_list = []
+    logLine("Initialized probe prompts")
 
-            logLine("Initializing probe prompts...")
-            population = initPop(seedCodons, NPOP)
-            embeddings_list = []
-            logLine("Initialized probe prompts")
+    logLine(f"Max usable batch size: {NINFBATCH}")
 
-            # @find_executable_batch_size(starting_batch_size=8)
-            # def run_benchmark(batch_size):
-            #     _ = getPromptPerf(model, tokenizer, accelerator, population[0].prompt, trainset, batch_size)
+    logLine("Initializing embeddings")
+    for s in population:
+        t0 = time.time()
+        s.fitnessGtTr = getPromptPerf(model, tokenizer, s.prompt, trainset, NINFBATCH)
+        s.fitnessGtTe = getPromptPerf(model, tokenizer, s.prompt, testset, NINFBATCH)
+        embeddings_list.append(s.fitnessGtTr)
+        s.fitness = s.fitnessGtTr.mean().item()
+        totalNLLTime += time.time()-t0
+        totalNLLElems += len(fullDataset)
+    embeddings = torch.stack(embeddings_list).T
 
-            # logLine("Finding max batch size...")
-            # run_benchmark()
-            # NINFBATCH = run_benchmark.batch_size
-            NINFBATCH = 24
-            logLine(f"Max usable batch size: {NINFBATCH}")
+    GtTr = torch.stack([s.fitnessGtTr for s in population]).mean(dim=0)
+    GtTe = torch.stack([s.fitnessGtTe for s in population]).mean(dim=0)
+    data["GtTr"].append(GtTr)
+    data["GtTe"].append(GtTe)
+    data["embeddings"] = embeddings
+    logLine("Initialized embeddings")
 
-            logLine("Initializing embeddings")
-            for s in population:
+    for gen in range(NGENS):
+        logLine(f"Starting Gen#{gen}")
+        tGenStart = time.time()
+        logLine(f"\tMutating")
+        population += [mutate(model, tokenizer, random.choice(population[:NELITES])) for _ in range((NPOP - len(population))//2)]
+        logLine(f"\tCrossovering")
+        population += [crossover(*random.sample(population, 2)) for _ in range(NPOP - len(population))]
+        logLine(f"\tEvaluating fitnesses")
+        for s in population:
+            if s.fitness is None and s.fitnessGtTr is None:
                 t0 = time.time()
                 s.fitnessGtTr = getPromptPerf(model, tokenizer, s.prompt, trainset, NINFBATCH)
-                s.fitnessGtTe = getPromptPerf(model, tokenizer, s.prompt, testset, NINFBATCH)
-                embeddings_list.append(s.fitnessGtTr)
-                s.fitness = s.fitnessGtTr.mean().item()
                 totalNLLTime += time.time()-t0
-                totalNLLElems += len(fullDataset)
-            embeddings = torch.stack(embeddings_list).T
+                totalNLLElems += len(trainset)
+                s.fitness = s.fitnessGtTr.mean().item()
+            if s.fitnessGtTe is None:
+                t0 = time.time()
+                s.fitnessGtTe = getPromptPerf(model, tokenizer, s.prompt, testset, NINFBATCH)
+                totalNLLTime += time.time()-t0
+                totalNLLElems += len(testset)
 
-            GtTr = torch.stack([s.fitnessGtTr for s in population]).mean(dim=0)
-            GtTe = torch.stack([s.fitnessGtTe for s in population]).mean(dim=0)
-            data["GtTr"].append(GtTr)
-            data["GtTe"].append(GtTe)
-            data["embeddings"] = embeddings
-            logLine("Initialized embeddings")
+        population.sort(key=lambda s: s.fitness, reverse=True)
+        tGen = time.time() - tGenStart
+        logLine(f"t+{tGen:.2f}s Finished Gen#{gen}")
+        logLine([s.fitness for s in population])
 
-            for gen in range(NGENS):
-                logLine(f"Starting Gen#{gen}")
-                tGenStart = time.time()
-                logLine(f"\tMutating")
-                population += [mutate(model, tokenizer, random.choice(population[:NELITES])) for _ in range((NPOP - len(population))//2)]
-                logLine(f"\tCrossovering")
-                population += [crossover(*random.sample(population, 2)) for _ in range(NPOP - len(population))]
-                logLine(f"\tEvaluating fitnesses")
-                for s in population:
-                    if s.fitness is None and s.fitnessGtTr is None:
-                        t0 = time.time()
-                        s.fitnessGtTr = getPromptPerf(model, tokenizer, accelerator, s.prompt, trainset, NINFBATCH)
-                        totalNLLTime += time.time()-t0
-                        totalNLLElems += len(trainset)
-                        s.fitness = s.fitnessGtTr.mean().item()
-                    if s.fitnessGtTe is None:
-                        t0 = time.time()
-                        s.fitnessGtTe = getPromptPerf(model, tokenizer, accelerator, s.prompt, testset, NINFBATCH)
-                        totalNLLTime += time.time()-t0
-                        totalNLLElems += len(testset)
+        GtTr = torch.stack([s.fitnessGtTr for s in population]).mean(dim=0)
+        GtTe = torch.stack([s.fitnessGtTe for s in population]).mean(dim=0)
+        data["GtTr"].append(GtTr)
+        data["GtTe"].append(GtTe)
 
-                population.sort(key=lambda s: s.fitness, reverse=True)
-                tGen = time.time() - tGenStart
-                logLine(f"t+{tGen:.2f}s Finished Gen#{gen}")
-                logLine([s.fitness for s in population])
+        population = population[:NELITES]
+        logLine(f"\tCurrent Best: {population[0]}")
 
-                GtTr = torch.stack([s.fitnessGtTr for s in population]).mean(dim=0)
-                GtTe = torch.stack([s.fitnessGtTe for s in population]).mean(dim=0)
-                data["GtTr"].append(GtTr)
-                data["GtTe"].append(GtTe)
+    data["GtTr"] = torch.stack(data["GtTr"])
+    data["GtTe"] = torch.stack(data["GtTe"])
+    data["nNLL"] = totalNLLElems
+    data["tNLL"] = totalNLLTime
+    torch.save(data, f"data_{datasetID}_{datasetrun}.pt")
+    logLine(f"t+{time.time()-tRunStart:.2f}s\t****Finished {datasetID}-{datasetrun}")
 
-                population = population[:NELITES]
-                logLine(f"\tCurrent Best: {population[0]}")
-
-            data["GtTr"] = torch.stack(data["GtTr"])
-            data["GtTe"] = torch.stack(data["GtTe"])
-            data["nNLL"] = totalNLLElems
-            data["tNLL"] = totalNLLTime
-            if accelerator.is_main_process:
-                torch.save(data, f"data_{datasetID}_{datasetrun}.pt")
-            logLine(f"t+{time.time()-tRunStart:.2f}s\t****Finished {datasetID}-{datasetrun}")
-
-
+import argparse
 if __name__ == "__main__":
-    main()
+    parser = argparse.ArgumentParser(description="Run optimization with two int args.")
+    parser.add_argument("arg1", type=int, help="Dataset")
+    parser.add_argument("arg2", type=int, help="Filenumber")
+    args = parser.parse_args()
+    main(args.arg1, args.arg2)

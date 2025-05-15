@@ -347,7 +347,7 @@ def main():
 
     logLine("Loading model...")
     tokenizer = AutoTokenizer.from_pretrained(modelName)
-    model = AutoModelForCausalLM.from_pretrained(modelName, cache_dir=".", torch_dtype=torch.float16, device_map="auto")
+    model = AutoModelForCausalLM.from_pretrained(modelName, torch_dtype=torch.float16, device_map="auto")
     logLine("Loaded model")
 
     for datasetrun in range(NDATASETRUNS):
