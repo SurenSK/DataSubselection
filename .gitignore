@@ -3,3 +3,4 @@ output/
 spikes/
 main.py
 test.py
+log*
