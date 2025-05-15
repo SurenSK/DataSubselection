@@ -13,6 +13,7 @@ import ot
 from torch.utils.data import DataLoader, Dataset
 from accelerate import Accelerator
 from accelerate import find_executable_batch_size
+from accelerate.utils import set_seed
 
 class PromptSample:
     count = 0
@@ -473,13 +474,7 @@ def main():
             logLine(f"\t****Starting {datasetID}-{datasetrun}")
 
             SEED = datasetrun
-            random.seed(SEED)
-            np.random.seed(SEED)
-            torch.manual_seed(SEED)
-            if torch.cuda.is_available():
-                torch.cuda.manual_seed_all(SEED)
-            accelerator.wait_for_everyone()
-            accelerator.manual_seed(SEED)
+            set_seed(SEED)
             logLine(f"Seeds set to {SEED}")
 
             logLine("Loading dataset...")
