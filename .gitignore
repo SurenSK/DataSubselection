@@ -1,6 +1,7 @@
 __pycache__/
 output/
 spikes/
+model*
 main.py
 test.py
 log*
