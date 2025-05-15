@@ -12,6 +12,7 @@ from datasets import load_dataset
 import ot
 from torch.utils.data import DataLoader, Dataset
 from accelerate import Accelerator
+from accelerate import find_executable_batch_size
 
 class PromptSample:
     count = 0
@@ -27,7 +28,7 @@ class PromptSample:
     def __repr__(self):
         fitness_str = f"{self.fitness:.2f}" if self.fitness is not None else "None"
         fitnessTe_str = f"{self.fitnessGtTe.mean().item():.2f}" if self.fitnessGtTe is not None else "None"
-        return f"ID:{self.sampleId} fitness={fitness_str} fitnessTe={fitnessTe_str} prompt=<'{" ".join(self.codons)}'>"
+        return f"ID:{self.sampleId} fitness={fitness_str} fitnessTe={fitnessTe_str} prompt=<{self.prompt}>"
 
 log_file_path = "log.txt"
 logAccelerator = None
@@ -344,7 +345,6 @@ def mutate(model, tokenizer, p1):
 def crossover(p1, p2):
     return PromptSample([random.choice(pair) for pair in zip(p1.codons, p2.codons)])
 
-from accelerate import find_executable_batch_size
 def main():
     global log_file_path
     global logAccelerator
