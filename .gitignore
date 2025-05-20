@@ -5,3 +5,5 @@ model*
 main.py
 test.py
 log*
+data*
+analysis*

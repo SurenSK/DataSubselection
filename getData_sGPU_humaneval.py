@@ -28,7 +28,7 @@ class PromptSample:
         return f"ID:{self.sampleId} fitness={fitness_str} fitnessTe={fitnessTe_str} prompt=<{self.prompt}>"
 
 log_file_path = "log.txt"
-def logLine(s, verbose=False):
+def logLine(s, verbose=True):
     if verbose:
         print(s)
     with open(log_file_path, "a") as log_file:
@@ -331,7 +331,7 @@ def main(datasetIdx, logFileIdx):
     logLine("Starting")
 
     modelName = "Qwen/Qwen2.5-7B"
-    NINFBATCH = 16
+    NINFBATCH = 1
     NPOP = 25
     NGENS = 10
     NELITES = 2
@@ -470,8 +470,8 @@ def main(datasetIdx, logFileIdx):
         totalNLLElems += len(fullDataset)
     embeddings = torch.stack(embeddings_list).T
 
-    GtTr = torch.stack([s.fitnessGtTr for s in population]).mean(dim=0)
-    GtTe = torch.stack([s.fitnessGtTe for s in population]).mean(dim=0)
+    GtTr = torch.stack([s.fitnessGtTr for s in population])
+    GtTe = torch.stack([s.fitnessGtTe for s in population])
     data["GtTr"].append(GtTr)
     data["GtTe"].append(GtTe)
     data["embeddings"] = embeddings
@@ -503,8 +503,8 @@ def main(datasetIdx, logFileIdx):
         logLine(f"t+{tGen:.2f}s Finished Gen#{gen}")
         logLine([s.fitness for s in population])
 
-        GtTr = torch.stack([s.fitnessGtTr for s in population]).mean(dim=0)
-        GtTe = torch.stack([s.fitnessGtTe for s in population]).mean(dim=0)
+        GtTr = torch.stack([s.fitnessGtTr for s in population])
+        GtTe = torch.stack([s.fitnessGtTe for s in population])
         data["GtTr"].append(GtTr)
         data["GtTe"].append(GtTe)
 
@@ -517,11 +517,22 @@ def main(datasetIdx, logFileIdx):
     data["tNLL"] = totalNLLTime
     torch.save(data, f"data_{datasetID}_{datasetrun}.pt")
     logLine(f"t+{time.time()-tRunStart:.2f}s\t****Finished {datasetID}-{datasetrun}")
+    del model
+    del tokenizer
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+    PromptSample.count = 0
+
 
 import argparse
+import os
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Run optimization with two int args.")
-    parser.add_argument("arg1", type=int, nargs='?', default=0, help="Dataset")
-    parser.add_argument("arg2", type=int, nargs='?', default=0, help="Filenumber")
-    args = parser.parse_args()
-    main(args.arg1, args.arg2)
+    # datasets = ["gsm8k","humaneval","commonsenseqa"]
+    # parser = argparse.ArgumentParser(description="Run optimization with two int args.")
+    # parser.add_argument("arg1", type=int, nargs='?', default=1, help="Dataset")
+    # parser.add_argument("arg2", type=int, nargs='?', default=0, help="Filenumber")
+    # args = parser.parse_args()
+    # # main(args.arg1, args.arg2)
+    # for i in range(1,5): 
+    #     main(1,i)
+    main(1,2)
