@@ -326,15 +326,9 @@ def mutate(model, tokenizer, p1):
 def crossover(p1, p2):
     return PromptSample([random.choice(pair) for pair in zip(p1.codons, p2.codons)])
 
-def main(datasetIdx, maxRuns):
+def main(datasetIdx, datasetrun):
     global log_file_path
-    datasets = ["gsm8k","humaneval","commonsenseqa"]
-    datasetrun = next(i for i in range(1000) if not os.path.exists(f"log_{datasets[args.arg1]}_{i}.txt"))
-    logLine(f"Starting with dataset={datasets[args.arg1]} filenumber={datasetrun}", verbose=True)
-    if datasetrun >= maxRuns:
-        return False
-
-    logLine("Starting")
+    logLine(f"Starting")
 
     modelName = "Qwen/Qwen2.5-7B"
     NINFBATCH = 16
@@ -528,15 +522,15 @@ def main(datasetIdx, maxRuns):
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
     PromptSample.count = 0
-    return True
 
 import argparse
 import os
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Run optimization")
     parser.add_argument("arg1", type=int, nargs='?', default=1, help="Dataset")
-    parser.add_argument("arg2", type=int, nargs='?', default=5, help="Dataset")
+    parser.add_argument("arg2", type=int, nargs='?', default=5, help="MinIdx")
+    parser.add_argument("arg3", type=int, nargs='?', default=5, help="MaxIdx")
     args = parser.parse_args()
-    while main(args.arg1, args.arg2):
-        pass
-    print(f"Hit limit - {args.arg2} runs, exiting...")
+
+    for i in range(args.arg2, args.arg3):
+        main(args.arg1, i)
