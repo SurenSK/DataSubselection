@@ -7,25 +7,42 @@ from joblib import Memory
 import juliacall
 from juliacall import Main as jl
 import torch
+from functools import wraps
+import dask
+from dask.cache import Cache
 import umap
 import ot
+pass
 
 cachedir = './cache'
 memory = Memory(cachedir, verbose=0)
+def timeCache(func):
+    @wraps(func)
+    def wrapper(*args, **kwargs):
+        @memory.cache
+        def cachedFunc(*args, **kwargs):
+            t0 = time.time()
+            res = func(*args, **kwargs)
+            return res, time.time() - t0
+        return cachedFunc(*args, **kwargs)
+    return wrapper
 
-@memory.cache
+@dask.delayed
+@timeCache
 def getData(dataID, i):
     dataStr = f"data/data_{dataID}_{i}.pt"
     return torch.load(dataStr, map_location=torch.device('cpu'), weights_only=True)["embeddings"]
 
-@memory.cache
+@dask.delayed
+@timeCache
 def getDist(P,metric):
     if metric=="euclidean": return torch.cdist(P, P).cpu().numpy()
     if metric=="cosine":
         normP=torch.nn.functional.normalize(P,p=2,dim=1,eps=1e-12)
         return 1-(normP@normP.T).cpu().numpy()
 
-@memory.cache
+@dask.delayed
+@timeCache
 def getGraphKNN(D, K, linkage):
     D_=D.copy()
     indices = np.argpartition(D_, K, axis=1)[:, :K]
@@ -36,7 +53,8 @@ def getGraphKNN(D, K, linkage):
     D_[~M] = 0
     return csr_matrix(D_)
 
-@memory.cache
+@dask.delayed
+@timeCache
 def getGraphEpsBall(D):
     D_ = D.copy()
     mst = minimum_spanning_tree(D_)
@@ -44,7 +62,8 @@ def getGraphEpsBall(D):
     D_[~M] = 0
     return csr_matrix(D_)
 
-@memory.cache
+@dask.delayed
+@timeCache
 def getGraphUMAP(P, K):
     P_ = np.ascontiguousarray(P ,dtype=np.float64)
     umapLearner = umap.UMAP(n_neighbors=K, random_state=0)
@@ -53,26 +72,31 @@ def getGraphUMAP(P, K):
     graph.data = -np.log(graph.data)
     return graph
 
-@memory.cache
+@dask.delayed
+@timeCache
 def getGeodesicsAPSP(G):
     return shortest_path(G, method='D', directed=False)
 
 jl.seval("using Laplacians")
-@memory.cache
+@dask.delayed
+@timeCache
 def getGeodesicsR(G):
     C=G.copy()
     C.data=1/(C.data+1e-9)
     return jl.Laplacians.effectiveResistances(C)
 
-@memory.cache
+@dask.delayed
+@timeCache
 def getIdxRnd(P, k):
     return torch.randperm(P.shape[0])[:k]
 
-@memory.cache
+@dask.delayed
+@timeCache
 def getIdxStratified(P, k):
     return (P**2).sum(1).argsort()[torch.linspace(0,P.shape[0]-1,k+2,device=P.device)[1:-1].long()]
 
-@memory.cache
+@dask.delayed
+@timeCache
 def getIdxOT(C, k, maxIters=10, maxItersOT=100):
     C_ = C.copy()/C.max()
     N = C.shape[0]
@@ -97,7 +121,8 @@ def getIdxOT(C, k, maxIters=10, maxItersOT=100):
         selW = np.sum(T,axis=1)
     return selIdx, selW
 
-@memory.cache
+@dask.delayed
+@timeCache
 def MAE(gtPerf, selIdx, selW=None):
     selW = np.full(selIdx.shape[0],1/selIdx.shape[0]) if selW is None else selW
     selW /= selW.sum()
@@ -107,15 +132,5 @@ def MAE(gtPerf, selIdx, selW=None):
 
 data = getData("humaneval",0)
 i = getIdxStratified(data, 5)
-pass
-dists = [getDist(data,"euclidean"), getDist(data,"cosine")]
-graphsKNNm = [getGraphKNN(D,k,'mutual') for D in dists for k in range(2, int(data.shape[0]**0.5))]
-graphsKNNp = [getGraphKNN(D,k,'permissive') for D in dists for k in range(2, int(data.shape[0]**0.5))]
-graphsEpsBall = [getGraphEpsBall(D) for D in dists]
-graphsUMAP = [getGraphUMAP(D,k) for D in dists for k in range(2, int(data.shape[0]**0.5))]
-graphs = graphsKNNm + graphsKNNp + graphsEpsBall + graphsUMAP
-geodesicsAPSP = [getGeodesicsAPSP(G) for G in graphs]
-geodesicsR = [getGeodesicsR(G) for G in graphs]
-geodesics = geodesicsAPSP + geodesicsR
 
 pass
