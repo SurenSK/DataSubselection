@@ -6,5 +6,5 @@ main.py
 test.py
 log*
 data*
-analysis*
+analysis_*
 scratch*
