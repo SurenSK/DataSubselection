@@ -7,9 +7,8 @@ import math
 import numpy as np
 from torch.nn import CrossEntropyLoss
 from transformers import AutoTokenizer, AutoModelForCausalLM
-from scipy.sparse.csgraph import shortest_path
 from datasets import load_dataset
-import ot
+from tqdm import tqdm
 
 class PromptSample:
     count = 0
@@ -115,117 +114,6 @@ def getData(datasetID, n=None):
         logLine(f"Failed to fetch dataset, id not found - {datasetID}")
         return None
 
-def getGeodesics(P, K, linkage=None):
-    t0 = time.time()
-    D = torch.cdist(P, P)
-    logLine(f"t+{time.time()-t0:.2f}s Calculated Pairwise Dists")
-    
-    t0 = time.time()
-    if K <= 0:
-        return torch.zeros_like(D, dtype=torch.bool)
-    if K >= D.shape[1]:
-        return torch.ones_like(D, dtype=torch.bool)
-    _, indices = torch.topk(D, K, dim=1, largest=False, sorted=False)
-    M = torch.zeros_like(D, dtype=torch.bool)
-    M.scatter_(dim=1, index=indices, value=True)
-    if linkage == 'mutual':
-        M = M & M.T
-    else:
-        M = M | M.T
-    D[~M] = torch.inf
-    logLine(f"t+{time.time()-t0:.2f}s Formed Graph")
-
-    t0 = time.time()
-    G = shortest_path(D.numpy(), method='auto', directed=False)
-    logLine(f"t+{time.time()-t0:.2f}s Calculated Geodesics")
-    return G
-
-def OT_sampling(k: int, X: np.ndarray, C: np.ndarray, max_iters: int = 100, num_sinkhorn_iter: int = 1000):
-    N, d_features = X.shape
-    cQ = np.random.choice(N, k, replace=False)
-    cQw = np.ones(k) / k
-    Xw = np.ones(N) / N
-    Cmax = np.max(C)
-    if Cmax == 0:
-        raise ValueError
-    C = C / Cmax
-
-    Q_indices = cQ.copy()
-    Qw_ = cQw.copy()
-
-    for iteration_count in range(max_iters):
-        cQC = C[:, cQ]
-        
-        cQw[cQw < 1e-9] = 1e-9 
-        cQw = cQw / np.sum(cQw)
-
-        try:
-            T = ot.sinkhorn(
-                a=Xw,
-                b=cQw,
-                M=cQC,
-                reg=0.01,
-                method='sinkhorn_stabilized',
-                numItermax=num_sinkhorn_iter,
-                warn=False
-            )
-        except Exception as e:
-            logLine(f"Warning: Sinkhorn failed in iteration {iteration_count + 1}: {e}")
-            if iteration_count > 0:
-                break 
-            else:
-                raise RuntimeError(
-                    f"Sinkhorn algorithm failed on the first iteration: {e}. "
-                    "Check input data, cost matrix, k, and regularization parameter 'reg'."
-                ) from e
-        
-        nextQk_indices = np.full(k, -1, dtype=int)
-        selected_indices_in_current_step = set()
-
-        for j_cluster in range(k):
-            weights_for_barycenter = T[:, j_cluster]
-            barycenter_candidate_costs = weights_for_barycenter @ C
-            
-            sorted_candidate_indices = np.argsort(barycenter_candidate_costs)
-            
-            found_unique_candidate_for_slot = False
-            for candidate_idx in sorted_candidate_indices:
-                if candidate_idx not in selected_indices_in_current_step:
-                    nextQk_indices[j_cluster] = candidate_idx
-                    selected_indices_in_current_step.add(candidate_idx)
-                    found_unique_candidate_for_slot = True
-                    break
-            
-            if not found_unique_candidate_for_slot:
-                    raise RuntimeError(
-                        f"Failed to find a unique candidate for cluster slot {j_cluster} (k={k}, N={N}). "
-                        "This should not happen if k <= N and N > 0."
-                    )
-        
-        cQ = nextQk_indices
-        
-        nextQw = np.sum(T, axis=0)
-        if np.sum(nextQw) > 1e-9 :
-            nextQw = nextQw / np.sum(nextQw)
-        else:
-            logLine("Failure in weight update")
-            nextQw = np.ones(k) / k
-        cQw = nextQw
-
-        if np.array_equal(Q_indices, cQ):
-            logLine(f"Converged at iteration {iteration_count + 1}")
-            break
-        Q_indices = cQ.copy()
-        Qw_ = cQw.copy()
-        if iteration_count == max_iters -1:
-            logLine(f"Reached max_iters {max_iters} without convergence of indices.")
-
-    final_Q_indices = Q_indices
-    final_Qw = Qw_
-    
-    return final_Q_indices, final_Qw
-
-from tqdm import tqdm
 def getNLL(model, tokenizer, inputStr_list, outputStr_list, batch_size):
     all_neg_losses = []
     all_perplexities = []

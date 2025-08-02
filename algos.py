@@ -1,18 +1,14 @@
 import time
 import numpy as np
-import random
 from scipy.sparse import csr_matrix
 from scipy.sparse.csgraph import minimum_spanning_tree, shortest_path
 from joblib import Memory
-import juliacall
 from juliacall import Main as jl
 import torch
 from functools import wraps
 import dask
-from dask.cache import Cache
 import umap
 import ot
-pass
 
 cachedir = './cache'
 memory = Memory(cachedir, verbose=0)
@@ -31,7 +27,8 @@ def timeCache(func):
 @timeCache
 def getData(dataID, i):
     dataStr = f"data/data_{dataID}_{i}.pt"
-    return torch.load(dataStr, map_location=torch.device('cpu'), weights_only=True)["embeddings"]
+    data = torch.load(dataStr, map_location=torch.device('cpu'))
+    return data["embeddings"], data["GtTr"], data["GtTe"]
 
 @dask.delayed
 @timeCache
@@ -45,7 +42,7 @@ def getDist(P,metric):
 @timeCache
 def getGraphKNN(D, K, linkage):
     D_=D.copy()
-    indices = np.argpartition(D_, K, axis=1)[:, :K]
+    indices = np.argpartition(D_, K+1, axis=1)[:, 1:K+1]
     M = np.zeros_like(D_, dtype=bool)
     np.put_along_axis(M, indices, True, axis=1)
     if linkage == 'mutual': M = M & M.T
@@ -107,7 +104,7 @@ def getIdxOT(C, k, maxIters=10, maxItersOT=100):
         try: T = ot.sinkhorn(a=tgtW, b=selW, C=C_[:, selIdx], reg=0.01, numItermax=maxItersOT).T
         except Exception as e: print(f"Sinkhorn failed at iteration {i}: {e}. Returning last valid result."); break
         selIdx_ = (T@C_).argmin(axis=1)
-        if len(set(selIdx_)) != selIdx_.shape[0]:
+        if len(set(selIdx_)) < selIdx_.shape[0]:
             seen, firstIdx = np.unique(selIdx_, return_index=True)
             seen = set(seen)
             mask = np.ones_like(selIdx_, dtype=bool)
@@ -119,18 +116,12 @@ def getIdxOT(C, k, maxIters=10, maxItersOT=100):
         if set(selIdx)==set(selIdx_): break
         selIdx = selIdx_
         selW = np.sum(T,axis=1)
-    return selIdx, selW
+    return selIdx, selW/selW.sum()
 
 @dask.delayed
 @timeCache
 def MAE(gtPerf, selIdx, selW=None):
-    selW = np.full(selIdx.shape[0],1/selIdx.shape[0]) if selW is None else selW
-    selW /= selW.sum()
-    sel = gtPerf[selIdx, :]
-    estPerf = selW@sel
-    return np.mean(np.abs(estPerf-gtPerf))
-
-data = getData("humaneval",0)
-i = getIdxStratified(data, 5)
-
-pass
+    selW = torch.full((selIdx.shape[0],), 1.0 / selIdx.shape[0]) if selW is None else torch.tensor(selW, dtype=gtPerf.dtype, device=gtPerf.device)
+    selPerf = gtPerf[:, selIdx]
+    estPerf = selPerf@selW
+    return torch.abs(estPerf - gtPerf.mean(dim=1)).mean().item()
